@@ -9,9 +9,16 @@ import (
 	"sync"
 )
 
-func recoverFromPanic(errorChan chan<- error) {
+type errorChannel struct {
+	C    chan error
+	once sync.Once
+}
+
+func recoverFromPanic(channel *errorChannel) {
 	if r := recover(); r != nil {
-		errorChan <-fmt.Errorf("psd: decodePackBitsPerLine failed with %v", r)
+		channel.once.Do(func() {
+			channel.C <-fmt.Errorf("psd: decodePackBitsPerLine failed with %v", r)
+		})
 	}
 }
 
@@ -64,7 +71,7 @@ func decodePackBits(dest []byte, r io.Reader, width int, lines int, large bool) 
 	wg.Add(n)
 	step := lines / n
 	ofs = 0
-	errorChan := make(chan error)
+	errorChannel := &errorChannel{C: make(chan error)}
 	wgDoneChan := make(chan bool)
 	go func() {
 		wg.Wait()
@@ -73,22 +80,22 @@ func decodePackBits(dest []byte, r io.Reader, width int, lines int, large bool) 
 	for i := 1; i < n; i++ {
 		go func(dest []byte, buf []byte, lens []int) {
 			defer wg.Done()
-			defer recoverFromPanic(errorChan)
+			defer recoverFromPanic(errorChannel)
 			decodePackBitsPerLine(dest, buf, lens)
 		}(dest[ofs*width:(ofs+step)*width], buf[offsets[ofs]:offsets[ofs+step]], lens[ofs:ofs+step])
 		ofs += step
 	}
 	go func() {
 		defer wg.Done()
-		defer recoverFromPanic(errorChan)
+		defer recoverFromPanic(errorChannel)
 		decodePackBitsPerLine(dest[ofs*width:], buf[offsets[ofs]:], lens[ofs:])
 	}()
 
 	select {
 	case <-wgDoneChan:
 		return
-	case err := <-errorChan:
-		close(errorChan)
+	case err := <-errorChannel.C:
+		close(errorChannel.C)
 		return 0, err
 	}
 }
